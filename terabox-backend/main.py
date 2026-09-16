@@ -16,18 +16,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Retrieve credentials or cookies from environment variables
-TERABOX_NDUS = os.getenv("TERABOX_NDUS", "")
-TERABOX_EMAIL = os.getenv("TERABOX_EMAIL", "")
-
 def get_session_cookie() -> str:
-    cookie_val = TERABOX_NDUS or os.getenv("TERABOX_NDUS_COOKIE", "")
+    cookie_val = os.getenv("TERABOX_NDUS", "").strip() or os.getenv("TERABOX_NDUS_COOKIE", "").strip()
     if not cookie_val:
         raise HTTPException(
             status_code=500,
             detail="Server Error: TERABOX_NDUS environment variable is missing on Render."
         )
-    return cookie_val if "ndus=" in cookie_val else f"ndus={cookie_val}"
+    clean_val = cookie_val.split("ndus=")[-1].strip()
+    return f"ndus={clean_val}"
 
 @app.get("/")
 def read_root():
@@ -37,21 +34,28 @@ def read_root():
 def list_files(dir_path: str = Query("/", description="Directory path on TeraBox")):
     cookie_str = get_session_cookie()
     
+    # Official TeraBox Web Client API parameters (app_id=250528 is required for single ndus cookie auth)
     url = "https://www.terabox.com/api/list"
     params = {
+        "app_id": "250528",
+        "web": "1",
+        "channel": "dubox",
+        "clienttype": "0",
         "dir": dir_path,
         "order": "time",
-        "desc": "1"
+        "desc": "1",
+        "showempty": "0"
     }
+    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Cookie": cookie_str,
         "Referer": "https://www.terabox.com/main",
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
     try:
-        # Impersonate standard Chrome browser TLS fingerprint to bypass 400 errors
         response = requests.get(
             url, 
             params=params, 
@@ -60,17 +64,14 @@ def list_files(dir_path: str = Query("/", description="Directory path on TeraBox
             timeout=15
         )
         
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"TeraBox HTTP Error: {response.status_code}"
-            )
-
         data = response.json()
+        
         if data.get("errno") != 0:
+            error_code = data.get("errno")
+            error_msg = data.get("errmsg", "Invalid session or parameter error")
             raise HTTPException(
                 status_code=400,
-                detail=f"TeraBox API Error: {data.get('errmsg', 'Failed to retrieve directory list')}"
+                detail=f"TeraBox API Error (errno {error_code}): {error_msg}"
             )
 
         files = []
@@ -88,9 +89,7 @@ def list_files(dir_path: str = Query("/", description="Directory path on TeraBox
 
         return {"status": "success", "count": len(files), "files": files}
 
+    except HTTPException as he:
+        raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Request Failed: {str(e)}")
-
-        return {"status": "success", "message": f"Successfully deleted: {file_path}"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
