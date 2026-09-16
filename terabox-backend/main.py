@@ -1,7 +1,6 @@
 import os
 import time
 import json
-import requests
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
