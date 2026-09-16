@@ -33,8 +33,8 @@ def read_root():
 @app.get("/api/files")
 def list_files(dir_path: str = Query("/", description="Directory path on TeraBox")):
     cookie_str = get_session_cookie()
+    js_token = os.getenv("TERABOX_JSTOKEN", "").strip()
     
-    # Official TeraBox Web Client API parameters (app_id=250528 is required for single ndus cookie auth)
     url = "https://www.terabox.com/api/list"
     params = {
         "app_id": "250528",
@@ -46,6 +46,9 @@ def list_files(dir_path: str = Query("/", description="Directory path on TeraBox
         "desc": "1",
         "showempty": "0"
     }
+    
+    if js_token:
+        params["jsToken"] = js_token
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
