@@ -1,4 +1,3 @@
 fastapi
 uvicorn
-playwright
-playwright-stealth
+curl_cffi
