@@ -26,15 +26,31 @@ page: Page = None
 lock = asyncio.Lock()
 
 
+async def ensure_browser_started():
+    """Guarantees Playwright and Chromium instances are initialized before use."""
+    global playwright_instance, browser
+    if not playwright_instance:
+        playwright_instance = await async_playwright().start()
+    if not browser or not browser.is_connected():
+        browser = await playwright_instance.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
+
+
 async def login_and_save_state():
     """Performs full UI login and saves the authenticated state to state.json."""
     global context, page
     
     print("State invalid or missing. Performing fresh login...")
+    await ensure_browser_started()
+
     if page and not page.is_closed():
         await page.close()
+    if context:
+        await context.close()
 
-    # Create fresh context without saved state
+    # Create fresh context directly from guaranteed browser instance
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
@@ -57,7 +73,7 @@ async def login_and_save_state():
 
 async def init_session():
     """Boots browser using state.json if available, speeding up startup."""
-    global playwright_instance, browser, context, page
+    global context, page
 
     if not TERABOX_EMAIL or not TERABOX_PASSWORD:
         raise HTTPException(
@@ -68,12 +84,7 @@ async def init_session():
     if page and not page.is_closed():
         return
 
-    if not playwright_instance:
-        playwright_instance = await async_playwright().start()
-        browser = await playwright_instance.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
-        )
+    await ensure_browser_started()
 
     # Try loading existing session state
     if os.path.exists(STATE_FILE):
