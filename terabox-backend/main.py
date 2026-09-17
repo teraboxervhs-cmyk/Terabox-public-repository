@@ -15,10 +15,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-TERABOX_EMAIL = os.getenv("TERABOX_EMAIL", "")
-TERABOX_PASSWORD = os.getenv("TERABOX_PASSWORD", "")
-
+TERABOX_STATE_JSON = os.getenv("TERABOX_STATE_JSON", "")
 STATE_FILE = "state.json"
+
 playwright_instance = None
 browser = None
 context: BrowserContext = None
@@ -38,87 +37,45 @@ async def ensure_browser_started():
         )
 
 
-async def login_and_save_state():
-    """Performs full UI login using resilient selectors and saves state to state.json."""
-    global context, page
-    
-    print("State invalid or missing. Performing fresh login...")
-    await ensure_browser_started()
-
-    if page and not page.is_closed():
-        await page.close()
-    if context:
-        await context.close()
-
-    # Open fresh context with realistic desktop User-Agent
-    context = await browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-    page = await context.new_page()
-
-    # 1. Navigate using domcontentloaded
-    await page.goto("https://www.terabox.com/main", wait_until="domcontentloaded", timeout=60000)
-
-    # 2. Pause briefly for client-side JS rendering
-    await page.wait_for_timeout(3000)
-
-    # 3. Fill Email
-    email_input = page.locator("input[type='text'], input[type='email'], input[name='userName']").first
-    await email_input.wait_for(state="visible", timeout=30000)
-    await email_input.fill(TERABOX_EMAIL)
-
-    # 4. Fill Password
-    password_input = page.locator("input[type='password'], input[name='password']").first
-    await password_input.wait_for(state="visible", timeout=30000)
-    await password_input.fill(TERABOX_PASSWORD)
-
-    # 5. Submit form
-    submit_btn = page.locator("button[type='submit'], .login-btn, form button, input[type='submit']").first
-    if await submit_btn.is_visible():
-        await submit_btn.click()
-    else:
-        await password_input.press("Enter")
-
-    # 6. Wait for redirect/dashboard load
-    await page.wait_for_timeout(7000)
-
-    # 7. Save authenticated session state to disk
-    await context.storage_state(path=STATE_FILE)
-    print(f"Session state saved successfully to {STATE_FILE}")
-
-
 async def init_session():
-    """Boots browser using state.json if available for instant startups."""
+    """Boots browser context using complete storage state matching domain 1024terabox.com."""
     global context, page
-
-    if not TERABOX_EMAIL or not TERABOX_PASSWORD:
-        raise HTTPException(
-            status_code=500,
-            detail="TERABOX_EMAIL or TERABOX_PASSWORD missing in environment variables."
-        )
 
     if page and not page.is_closed():
         return
 
     await ensure_browser_started()
 
-    # Restore session if state.json exists
+    # Write state.json from environment variable if not already present
+    if TERABOX_STATE_JSON:
+        print("Writing state.json from TERABOX_STATE_JSON environment variable...")
+        try:
+            parsed_state = json.loads(TERABOX_STATE_JSON)
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(parsed_state, f)
+        except Exception as e:
+            print(f"Error parsing TERABOX_STATE_JSON env var: {e}")
+
     if os.path.exists(STATE_FILE):
         try:
-            print("Found state.json. Restoring saved session...")
+            print("Found state.json. Restoring 1024terabox.com session...")
             context = await browser.new_context(
                 storage_state=STATE_FILE,
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
             page = await context.new_page()
-            await page.goto("https://www.terabox.com/main", wait_until="domcontentloaded", timeout=60000)
+            
+            # Navigate directly to the matching mirror domain
+            await page.goto("https://www.1024terabox.com/main", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3000)
             return
         except Exception as e:
-            print(f"Failed to load state.json: {e}")
+            print(f"Failed to restore session from state.json: {e}")
 
-    # Perform fresh login if state file is missing or invalid
-    await login_and_save_state()
+    raise HTTPException(
+        status_code=500,
+        detail="No valid session state found. Please set TERABOX_STATE_JSON in environment variables."
+    )
 
 
 @app.on_event("startup")
@@ -137,7 +94,6 @@ async def shutdown_event():
 
 @app.get("/")
 async def root():
-    """Root health check."""
     return {"status": "online", "message": "TeraBox Vault Backend Active", "endpoint": "/api/files"}
 
 
@@ -147,7 +103,7 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
         try:
             await init_session()
 
-            # Execute fetch inside page context by retrieving window.jsToken or dynamic window params if available
+            # Execute fetch targeting the 1024terabox.com domain to match session cookies
             js_script = f"""
                 async () => {{
                     let jsToken = '';
@@ -157,7 +113,7 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
                         jsToken = window.locals.jsToken;
                     }}
 
-                    let url = `https://www.terabox.com/api/list?app_id=250528&web=1&channel=dubox&clienttype=0&dir={dir_path}&order=time&desc=1`;
+                    let url = `https://www.1024terabox.com/api/list?app_id=250528&web=1&channel=dubox&clienttype=0&dir={dir_path}&order=time&desc=1`;
                     if (jsToken) {{
                         url += `&jsToken=${{encodeURIComponent(jsToken)}}`;
                     }}
@@ -171,12 +127,6 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
                 }}
             """
             res = await page.evaluate(js_script)
-
-            # If token expired or login lost, perform clean re-login and retry
-            if res.get("errno") in [-6, 400, 105]:
-                print(f"Session error ({res.get('errno')}). Re-authenticating...")
-                await login_and_save_state()
-                res = await page.evaluate(js_script)
 
             if res.get("errno") != 0:
                 raise HTTPException(
