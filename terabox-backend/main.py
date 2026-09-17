@@ -50,7 +50,7 @@ async def login_and_save_state():
     if context:
         await context.close()
 
-    # Open fresh context with desktop User-Agent
+    # Open fresh context with realistic desktop User-Agent
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
@@ -146,10 +146,15 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
         try:
             await init_session()
 
-            # Execute fetch directly inside the authenticated browser context
+            # Execute fetch directly inside authenticated browser context with required web client parameters
             js_script = f"""
                 async () => {{
-                    const res = await fetch('https://www.terabox.com/api/list?dir={dir_path}&order=time&desc=1');
+                    const url = 'https://www.terabox.com/api/list?app_id=250528&web=1&channel=dubox&clienttype=0&dir={dir_path}&order=time&desc=1';
+                    const res = await fetch(url, {{
+                        headers: {{
+                            'Accept': 'application/json, text/plain, */*'
+                        }}
+                    }});
                     return await res.json();
                 }}
             """
@@ -157,7 +162,7 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
 
             # Auto self-healing: re-authenticate if session token expired
             if res.get("errno") in [-6, 400]:
-                print("Session expired during API request. Re-authenticating...")
+                print("Session expired or invalid token during API request. Re-authenticating...")
                 await login_and_save_state()
                 res = await page.evaluate(js_script)
 
