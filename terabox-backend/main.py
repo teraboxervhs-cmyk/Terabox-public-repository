@@ -27,7 +27,7 @@ lock = asyncio.Lock()
 
 
 async def ensure_browser_started():
-    """Guarantees Playwright and Chromium instances are initialized before use."""
+    """Guarantees Playwright and Chromium instances are running safely before use."""
     global playwright_instance, browser
     if not playwright_instance:
         playwright_instance = await async_playwright().start()
@@ -50,35 +50,37 @@ async def login_and_save_state():
     if context:
         await context.close()
 
-    # Create fresh context directly from guaranteed browser instance
+    # Open fresh context with realistic desktop User-Agent
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
     page = await context.new_page()
 
-    await page.goto("https://www.terabox.com/main", wait_until="networkidle")
+    # 1. Navigate using domcontentloaded to prevent networkidle 30000ms timeouts
+    await page.goto("https://www.terabox.com/main", wait_until="domcontentloaded", timeout=60000)
 
-    # Perform UI login
+    # 2. Fill credentials & click submit
+    await page.wait_for_selector("input[type='text']", timeout=30000)
     await page.fill("input[type='text']", TERABOX_EMAIL)
     await page.fill("input[type='password']", TERABOX_PASSWORD)
     await page.click("button[type='submit']")
 
-    # Wait for file list container to confirm successful login
-    await page.wait_for_selector(".file-list", timeout=20000)
+    # 3. Wait for post-login container to confirm auth success
+    await page.wait_for_selector(".file-list, .user-info", timeout=30000)
 
-    # Save session state (cookies, localStorage, etc.)
+    # 4. Save session state (cookies, localStorage, tokens) to disk
     await context.storage_state(path=STATE_FILE)
     print(f"Session state saved successfully to {STATE_FILE}")
 
 
 async def init_session():
-    """Boots browser using state.json if available, speeding up startup."""
+    """Boots browser using state.json if available for instant sub-second startups."""
     global context, page
 
     if not TERABOX_EMAIL or not TERABOX_PASSWORD:
         raise HTTPException(
             status_code=500,
-            detail="TERABOX_EMAIL or TERABOX_PASSWORD missing in environment."
+            detail="TERABOX_EMAIL or TERABOX_PASSWORD missing in environment variables."
         )
 
     if page and not page.is_closed():
@@ -86,21 +88,21 @@ async def init_session():
 
     await ensure_browser_started()
 
-    # Try loading existing session state
+    # Load existing state.json if available
     if os.path.exists(STATE_FILE):
         try:
-            print("Found state.json. Restoring session...")
+            print("Found state.json. Restoring saved session...")
             context = await browser.new_context(
                 storage_state=STATE_FILE,
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
             page = await context.new_page()
-            await page.goto("https://www.terabox.com/main", wait_until="domcontentloaded")
+            await page.goto("https://www.terabox.com/main", wait_until="domcontentloaded", timeout=60000)
             return
         except Exception as e:
             print(f"Failed to load state.json: {e}")
 
-    # Fallback to fresh login if state file doesn't exist or is invalid
+    # Fallback to fresh login if state file is missing or expired
     await login_and_save_state()
 
 
@@ -118,13 +120,19 @@ async def shutdown_event():
         await playwright_instance.stop()
 
 
+@app.get("/")
+async def root():
+    """Root endpoint health check."""
+    return {"status": "online", "message": "TeraBox Vault Backend is Active", "endpoint": "/api/files"}
+
+
 @app.get("/api/files")
 async def list_files(dir_path: str = Query("/", description="Folder path on TeraBox")):
     async with lock:
         try:
             await init_session()
 
-            # Execute API call inside authenticated browser context
+            # Fetch file list directly from TeraBox internal API using browser session context
             js_script = f"""
                 async () => {{
                     const res = await fetch('https://www.terabox.com/api/list?dir={dir_path}&order=time&desc=1');
@@ -133,9 +141,9 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
             """
             res = await page.evaluate(js_script)
 
-            # If token expired while using saved state, re-login once automatically
+            # Auto self-healing: if session expired, re-authenticate and retry
             if res.get("errno") in [-6, 400]:
-                print("Session expired during request. Re-authenticating...")
+                print("Session expired during API request. Re-authenticating...")
                 await login_and_save_state()
                 res = await page.evaluate(js_script)
 
