@@ -46,8 +46,8 @@ async def init_session():
 
     await ensure_browser_started()
 
-    # Write state.json from environment variable if not already present
-    if TERABOX_STATE_JSON:
+    # Write state.json from environment variable if missing on disk
+    if TERABOX_STATE_JSON and not os.path.exists(STATE_FILE):
         print("Writing state.json from TERABOX_STATE_JSON environment variable...")
         try:
             parsed_state = json.loads(TERABOX_STATE_JSON)
@@ -65,7 +65,7 @@ async def init_session():
             )
             page = await context.new_page()
             
-            # Navigate directly to the matching mirror domain
+            # Navigate directly to the matching domain to initialize inline script variables
             await page.goto("https://www.1024terabox.com/main", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3000)
             return
@@ -103,30 +103,33 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
         try:
             await init_session()
 
-            # Execute fetch targeting the 1024terabox.com domain to match session cookies
-            js_script = f"""
-                async () => {{
-                    let jsToken = '';
-                    if (window.jsToken) {{
-                        jsToken = window.jsToken;
-                    }} else if (window.locals && window.locals.jsToken) {{
-                        jsToken = window.locals.jsToken;
-                    }}
+            # Safely extract jsToken from page context if available
+            js_token = await page.evaluate("""() => {
+                return window.jsToken || (window.locals && window.locals.jsToken) || '';
+            }""")
 
-                    let url = `https://www.1024terabox.com/api/list?app_id=250528&web=1&channel=dubox&clienttype=0&dir={dir_path}&order=time&desc=1`;
-                    if (jsToken) {{
-                        url += `&jsToken=${{encodeURIComponent(jsToken)}}`;
-                    }}
+            # Construct query URL
+            url = f"https://www.1024terabox.com/api/list?app_id=250528&web=1&channel=dubox&clienttype=0&dir={dir_path}&order=time&desc=1"
+            if js_token:
+                url += f"&jsToken={js_token}"
 
-                    const res = await fetch(url, {{
-                        headers: {{
-                            'Accept': 'application/json, text/plain, */*'
-                        }}
-                    }});
-                    return await res.json();
-                }}
-            """
-            res = await page.evaluate(js_script)
+            # Make native request using Playwright APIRequestContext (Bypasses CORS/CSP entirely)
+            response = await context.request.get(
+                url,
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Referer": "https://www.1024terabox.com/main"
+                }
+            )
+
+            if not response.ok:
+                raise HTTPException(
+                    status_code=response.status,
+                    detail=f"HTTP Error from TeraBox: {response.status_text}"
+                )
+
+            res = await response.json()
 
             if res.get("errno") != 0:
                 raise HTTPException(
