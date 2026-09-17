@@ -1,7 +1,8 @@
 import os
 import json
 import asyncio
-from fastapi import FastAPI, HTTPException, Query
+import tempfile
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import async_playwright, BrowserContext, Page
 
@@ -96,7 +97,7 @@ async def shutdown_event():
 
 @app.get("/")
 async def root():
-    return {"status": "online", "message": "TeraBox Vault Backend Active", "endpoint": "/api/files"}
+    return {"status": "online", "message": "TeraBox Vault Backend Active", "endpoints": ["/api/files", "/api/upload"]}
 
 
 @app.get("/api/files")
@@ -181,3 +182,47 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Playwright Error: {str(e)}")
+
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    async with lock:
+        try:
+            await init_session()
+
+            # Save uploaded payload into a temporary local file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename}") as temp_file:
+                content = await file.read()
+                temp_file.write(content)
+                temp_path = temp_file.name
+
+            try:
+                # Trigger file chooser modal using Playwright on TeraBox dashboard
+                file_input_selector = 'input[type="file"]'
+                
+                # Check if hidden input exists; if not, click upload button to instantiate
+                if not await page.is_visible(file_input_selector):
+                    upload_btn = page.locator('button:has-text("Upload"), div:has-text("Upload")').first
+                    if await upload_btn.is_visible():
+                        await upload_btn.click()
+                        await page.wait_for_timeout(1000)
+
+                # Set input file directly to trigger native JS change handler
+                await page.set_input_files(file_input_selector, temp_path)
+                await page.wait_for_timeout(3000)
+
+            finally:
+                # Cleanup temporary file from server disk
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+            return {
+                "status": "success", 
+                "filename": file.filename, 
+                "message": "File received and upload dispatched to TeraBox session"
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Upload Failed: {str(e)}")
