@@ -65,9 +65,9 @@ async def init_session():
             )
             page = await context.new_page()
             
-            # Navigate directly to the matching domain to initialize inline script variables
-            await page.goto("https://www.1024terabox.com/main", wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(3000)
+            # Navigate directly to the matching domain and wait until redirects settle
+            await page.goto("https://www.1024terabox.com/main", wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(2000)
             return
         except Exception as e:
             print(f"Failed to restore session from state.json: {e}")
@@ -103,17 +103,21 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
         try:
             await init_session()
 
-            # Safely extract jsToken from page context if available
-            js_token = await page.evaluate("""() => {
-                return window.jsToken || (window.locals && window.locals.jsToken) || '';
-            }""")
+            # Safely extract jsToken with fallback handling if context resets mid-navigation
+            js_token = ""
+            try:
+                js_token = await page.evaluate("""() => {
+                    return window.jsToken || (window.locals && window.locals.jsToken) || '';
+                }""")
+            except Exception as eval_err:
+                print(f"Notice: jsToken evaluation skipped ({eval_err})")
 
-            # Construct query URL
+            # Construct request URL
             url = f"https://www.1024terabox.com/api/list?app_id=250528&web=1&channel=dubox&clienttype=0&dir={dir_path}&order=time&desc=1"
             if js_token:
                 url += f"&jsToken={js_token}"
 
-            # Make native request using Playwright APIRequestContext (Bypasses CORS/CSP entirely)
+            # Make direct HTTP request via Playwright APIRequestContext (Bypasses browser CORS/CSP)
             response = await context.request.get(
                 url,
                 headers={
