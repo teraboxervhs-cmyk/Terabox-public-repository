@@ -39,7 +39,7 @@ async def ensure_browser_started():
 
 
 async def login_and_save_state():
-    """Performs full UI login and saves the authenticated state to state.json."""
+    """Performs full UI login using resilient selectors and saves state to state.json."""
     global context, page
     
     print("State invalid or missing. Performing fresh login...")
@@ -50,25 +50,39 @@ async def login_and_save_state():
     if context:
         await context.close()
 
-    # Open fresh context with realistic desktop User-Agent
+    # Open fresh context with desktop User-Agent
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
     page = await context.new_page()
 
-    # 1. Navigate using domcontentloaded to prevent networkidle 30000ms timeouts
+    # 1. Navigate using domcontentloaded to prevent networkidle 30s timeouts
     await page.goto("https://www.terabox.com/main", wait_until="domcontentloaded", timeout=60000)
 
-    # 2. Fill credentials & click submit
-    await page.wait_for_selector("input[type='text']", timeout=30000)
-    await page.fill("input[type='text']", TERABOX_EMAIL)
-    await page.fill("input[type='password']", TERABOX_PASSWORD)
-    await page.click("button[type='submit']")
+    # 2. Pause briefly for client-side JS/React rendering
+    await page.wait_for_timeout(3000)
 
-    # 3. Wait for post-login container to confirm auth success
-    await page.wait_for_selector(".file-list, .user-info", timeout=30000)
+    # 3. Locate and fill Email field using multiple fallback attributes
+    email_input = page.locator("input[type='text'], input[type='email'], input[name='userName']").first
+    await email_input.wait_for(state="visible", timeout=30000)
+    await email_input.fill(TERABOX_EMAIL)
 
-    # 4. Save session state (cookies, localStorage, tokens) to disk
+    # 4. Locate and fill Password field
+    password_input = page.locator("input[type='password'], input[name='password']").first
+    await password_input.wait_for(state="visible", timeout=30000)
+    await password_input.fill(TERABOX_PASSWORD)
+
+    # 5. Submit form (clicks submit button if visible, otherwise presses Enter)
+    submit_btn = page.locator("button[type='submit'], .login-btn, form button, input[type='submit']").first
+    if await submit_btn.is_visible():
+        await submit_btn.click()
+    else:
+        await password_input.press("Enter")
+
+    # 6. Wait for post-login session cookies to settle
+    await page.wait_for_timeout(5000)
+
+    # 7. Save authenticated session state to disk
     await context.storage_state(path=STATE_FILE)
     print(f"Session state saved successfully to {STATE_FILE}")
 
@@ -88,7 +102,7 @@ async def init_session():
 
     await ensure_browser_started()
 
-    # Load existing state.json if available
+    # Restore session if state.json exists
     if os.path.exists(STATE_FILE):
         try:
             print("Found state.json. Restoring saved session...")
@@ -102,7 +116,7 @@ async def init_session():
         except Exception as e:
             print(f"Failed to load state.json: {e}")
 
-    # Fallback to fresh login if state file is missing or expired
+    # Perform fresh login if state file is missing or invalid
     await login_and_save_state()
 
 
@@ -122,8 +136,8 @@ async def shutdown_event():
 
 @app.get("/")
 async def root():
-    """Root endpoint health check."""
-    return {"status": "online", "message": "TeraBox Vault Backend is Active", "endpoint": "/api/files"}
+    """Root health check to satisfy automated Render deployment checks."""
+    return {"status": "online", "message": "TeraBox Vault Backend Active", "endpoint": "/api/files"}
 
 
 @app.get("/api/files")
@@ -132,7 +146,7 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
         try:
             await init_session()
 
-            # Fetch file list directly from TeraBox internal API using browser session context
+            # Execute fetch directly inside the authenticated browser context
             js_script = f"""
                 async () => {{
                     const res = await fetch('https://www.terabox.com/api/list?dir={dir_path}&order=time&desc=1');
@@ -141,7 +155,7 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
             """
             res = await page.evaluate(js_script)
 
-            # Auto self-healing: if session expired, re-authenticate and retry
+            # Auto self-healing: re-authenticate if session token expired
             if res.get("errno") in [-6, 400]:
                 print("Session expired during API request. Re-authenticating...")
                 await login_and_save_state()
