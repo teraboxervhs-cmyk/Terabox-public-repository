@@ -56,31 +56,31 @@ async def login_and_save_state():
     )
     page = await context.new_page()
 
-    # 1. Navigate using domcontentloaded to prevent networkidle 30s timeouts
+    # 1. Navigate using domcontentloaded
     await page.goto("https://www.terabox.com/main", wait_until="domcontentloaded", timeout=60000)
 
-    # 2. Pause briefly for client-side JS/React rendering
+    # 2. Pause briefly for client-side JS rendering
     await page.wait_for_timeout(3000)
 
-    # 3. Locate and fill Email field using multiple fallback attributes
+    # 3. Fill Email
     email_input = page.locator("input[type='text'], input[type='email'], input[name='userName']").first
     await email_input.wait_for(state="visible", timeout=30000)
     await email_input.fill(TERABOX_EMAIL)
 
-    # 4. Locate and fill Password field
+    # 4. Fill Password
     password_input = page.locator("input[type='password'], input[name='password']").first
     await password_input.wait_for(state="visible", timeout=30000)
     await password_input.fill(TERABOX_PASSWORD)
 
-    # 5. Submit form (clicks submit button if visible, otherwise presses Enter)
+    # 5. Submit form
     submit_btn = page.locator("button[type='submit'], .login-btn, form button, input[type='submit']").first
     if await submit_btn.is_visible():
         await submit_btn.click()
     else:
         await password_input.press("Enter")
 
-    # 6. Wait for post-login session cookies to settle
-    await page.wait_for_timeout(5000)
+    # 6. Wait for redirect/dashboard load
+    await page.wait_for_timeout(7000)
 
     # 7. Save authenticated session state to disk
     await context.storage_state(path=STATE_FILE)
@@ -88,7 +88,7 @@ async def login_and_save_state():
 
 
 async def init_session():
-    """Boots browser using state.json if available for instant sub-second startups."""
+    """Boots browser using state.json if available for instant startups."""
     global context, page
 
     if not TERABOX_EMAIL or not TERABOX_PASSWORD:
@@ -112,6 +112,7 @@ async def init_session():
             )
             page = await context.new_page()
             await page.goto("https://www.terabox.com/main", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(3000)
             return
         except Exception as e:
             print(f"Failed to load state.json: {e}")
@@ -136,7 +137,7 @@ async def shutdown_event():
 
 @app.get("/")
 async def root():
-    """Root health check to satisfy automated Render deployment checks."""
+    """Root health check."""
     return {"status": "online", "message": "TeraBox Vault Backend Active", "endpoint": "/api/files"}
 
 
@@ -146,10 +147,21 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
         try:
             await init_session()
 
-            # Execute fetch directly inside authenticated browser context with required web client parameters
+            # Execute fetch inside page context by retrieving window.jsToken or dynamic window params if available
             js_script = f"""
                 async () => {{
-                    const url = 'https://www.terabox.com/api/list?app_id=250528&web=1&channel=dubox&clienttype=0&dir={dir_path}&order=time&desc=1';
+                    let jsToken = '';
+                    if (window.jsToken) {{
+                        jsToken = window.jsToken;
+                    }} else if (window.locals && window.locals.jsToken) {{
+                        jsToken = window.locals.jsToken;
+                    }}
+
+                    let url = `https://www.terabox.com/api/list?app_id=250528&web=1&channel=dubox&clienttype=0&dir={dir_path}&order=time&desc=1`;
+                    if (jsToken) {{
+                        url += `&jsToken=${{encodeURIComponent(jsToken)}}`;
+                    }}
+
                     const res = await fetch(url, {{
                         headers: {{
                             'Accept': 'application/json, text/plain, */*'
@@ -160,16 +172,16 @@ async def list_files(dir_path: str = Query("/", description="Folder path on Tera
             """
             res = await page.evaluate(js_script)
 
-            # Auto self-healing: re-authenticate if session token expired
-            if res.get("errno") in [-6, 400]:
-                print("Session expired or invalid token during API request. Re-authenticating...")
+            # If token expired or login lost, perform clean re-login and retry
+            if res.get("errno") in [-6, 400, 105]:
+                print(f"Session error ({res.get('errno')}). Re-authenticating...")
                 await login_and_save_state()
                 res = await page.evaluate(js_script)
 
             if res.get("errno") != 0:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"TeraBox Error: {res.get('errmsg', 'Failed to fetch files')}"
+                    detail=f"TeraBox Error ({res.get('errno')}): {res.get('errmsg', 'Failed to fetch files')}"
                 )
 
             files = [
