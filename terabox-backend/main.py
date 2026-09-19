@@ -50,6 +50,11 @@ async def init_session(force_reload=False):
         context = None
         page = None
 
+    # --- DEBUG LOGGING ---
+    print(f"DEBUG: TERABOX_STATE_JSON length = {len(TERABOX_STATE_JSON)}")
+    print(f"DEBUG: TERABOX_STATE_JSON starts with = {repr(TERABOX_STATE_JSON[:30])}")
+    # ---------------------
+
     if TERABOX_STATE_JSON and (not os.path.exists(STATE_FILE) or force_reload):
         print("Writing state.json from TERABOX_STATE_JSON environment variable...")
         try:
@@ -57,7 +62,7 @@ async def init_session(force_reload=False):
             with open(STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(parsed_state, f)
         except Exception as e:
-            print(f"Error parsing TERABOX_STATE_JSON env var: {e}")
+            print(f"ERROR: Failed to parse TERABOX_STATE_JSON env var: {e}")
 
     if os.path.exists(STATE_FILE):
         try:
